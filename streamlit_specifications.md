@@ -5,7 +5,7 @@
 
 ### Purpose of the Application
 
-The SEC EDGAR Data Pipeline Streamlit application is designed as a development blueprint for "QuantInsight Analytics," simulating a Software Developer's workflow for ingesting, processing, and analyzing public financial disclosures from the SEC EDGAR database. It provides an interactive interface to configure, execute, and monitor an end-to-end data pipeline, demonstrating concepts like rate-limited downloading, content-hash-based deduplication, universal document parsing (HTML/PDF), and smart document chunking for AI readiness.
+The SEC EDGAR Data Pipeline Streamlit application is designed as a development blueprint for "PE ORG-AIR System" simulating a Software Developer's workflow for ingesting, processing, and analyzing public financial disclosures from the SEC EDGAR database. It provides an interactive interface to configure, execute, and monitor an end-to-end data pipeline, demonstrating concepts like rate-limited downloading, content-hash-based deduplication, universal document parsing (HTML/PDF), and smart document chunking for AI readiness.
 
 ### High-Level Story Flow
 
