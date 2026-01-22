@@ -12,7 +12,7 @@ import pdfplumber
 import httpx  # For general async HTTP requests, if needed
 import fitz  # PyMuPDF for PDF processing
 from source import SECDownloader, DocumentParser, DocumentChunker, SECPipeline
-
+import streamlit_mermaid as stmd
 
 # Page Config and Header
 st.set_page_config(page_title="QuLab: SEC EDGAR Pipeline", layout="wide")
@@ -21,11 +21,34 @@ st.sidebar.divider()
 st.title("QuLab: SEC EDGAR Pipeline")
 st.divider()
 
+
+mermaid_steps = """
+flowchart LR
+
+  %% Define Nodes with attached classes
+  STEP1[Setup pipeline]:::c1
+  STEP2[Add downloader]:::c2
+  STEP3[Add rate limiting]:::c3
+  STEP4[Download filings]:::c4
+  STEP5[Parse documents]:::c5
+  STEP6[Deduplicate]:::c6
+  STEP7[Chunk text]:::c7
+  STEP8[Process loop]:::c8
+  STEP9[Generate report]:::c9
+
+  %% Define Connections
+  STEP1 --> STEP2 --> STEP3 --> STEP4 --> STEP5 --> STEP6 --> STEP7 --> STEP8 --> STEP9
+
+  %% Define Styles (Colors)
+  classDef c{step} fill:#ffcc99,stroke:#333,stroke-width:2px,color:#000
+"""
+
+
 # Initialize session state variables
 if 'current_page' not in st.session_state:
     st.session_state.current_page = 'Home'
 if 'company_name' not in st.session_state:
-    st.session_state.company_name = "company_name Analytics"
+    st.session_state.company_name = "SEC Analytics"
 if 'email_address' not in st.session_state:
     st.session_state.email_address = "your_email@company_name.com"
 if 'download_dir' not in st.session_state:
@@ -111,9 +134,10 @@ if st.session_state.current_page == 'Home':
         f"## Introduction")
     st.markdown(f"Your current mission is critical: to establish a robust, reliable, and scalable pipeline for ingesting public financial disclosures from the SEC EDGAR database. The platform relies on this data for everything from regulatory compliance and market research to sophisticated investment analysis and AI-driven insights.")
     st.markdown(f"")
-    st.markdown(f"The challenge lies in handling the volume and variety of SEC filings (10-K, 10-Q, 8-K, DEF 14A), adhering to SEC's API guidelines (especially rate limits), and ensuring data quality through deduplication and intelligent document segmentation. This application will walk you through building the core components of this pipeline, demonstrating how each step addresses a real-world requirement for company_name Analytics. You will implement a rate-limited downloader, a content-hash-based registry for deduplication, a versatile parser for HTML and PDF filings, and a smart chunking mechanism for AI readiness.")
+    st.markdown(f"The challenge lies in handling the volume and variety of SEC filings (10-K, 10-Q, 8-K, DEF 14A), adhering to SEC's API guidelines (especially rate limits), and ensuring data quality through deduplication and intelligent document segmentation. This application will walk you through building the core components of this pipeline, demonstrating how each step addresses a real-world requirement for QuantInsight Analytics. You will implement a rate-limited downloader, a content-hash-based registry for deduplication, a versatile parser for HTML and PDF filings, and a smart chunking mechanism for AI readiness.")
     st.markdown(f"")
     st.markdown(f"Your work here lays the groundwork for all downstream applications, ensuring that our analysts and AI models always have access to clean, non-redundant, and properly formatted financial data.")
+    stmd.st_mermaid(mermaid_steps.format(step=1))
     st.markdown(f"---")
     st.markdown(f"## Key Concepts")
     st.markdown(f"""
@@ -142,6 +166,7 @@ elif st.session_state.current_page == 'Configuration & Setup':
     st.markdown(r"$$ T_{delay} = \frac{1}{R_{max}} $$")
     st.markdown(
         f"where $R_{{max}}$ is the maximum allowed requests per second. For SEC EDGAR, we will aim for a conservative delay of 0.1 seconds (10 requests/second).")
+    stmd.st_mermaid(mermaid_steps.format(step=2))
     st.markdown(f"#### SECDownloader class")
     with st.expander("📄 View SECDownloader Code", expanded=False):
         st.code('''
@@ -155,7 +180,7 @@ class SECDownloader:
     REQUEST_DELAY = 0.1  # seconds
 
     def __init__(self, download_dir: str = "./sec_filings",
-                 company_name: str = "company_name Analytics",
+                 company_name: str = "QuantInsight Analytics",
                  email_address: str = "your_email@company_name.com"):
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(parents=True, exist_ok=True)
@@ -248,8 +273,9 @@ class SECDownloader:
     st.markdown(f"---")
 
     st.markdown(f"### Document Chunking Strategy")
-    st.markdown(f"Modern AI models, especially Large Language Models (LLMs), have token limits. Sending an entire, multi-page SEC filing to an LLM is often infeasible and inefficient. Moreover, smaller, context-rich chunks lead to better retrieval and generation quality. For company_name Analytics, our AI applications need document segments that are small enough to fit within model contexts (e.g., 500-1000 tokens) yet large enough to retain meaningful information and context.")
+    st.markdown(f"Modern AI models, especially Large Language Models (LLMs), have token limits. Sending an entire, multi-page SEC filing to an LLM is often infeasible and inefficient. Moreover, smaller, context-rich chunks lead to better retrieval and generation quality. For SEC Analytics, our AI applications need document segments that are small enough to fit within model contexts (e.g., 500-1000 tokens) yet large enough to retain meaningful information and context.")
     st.markdown(f"This process, known as 'chunking,' involves splitting a long document into smaller, manageable pieces. A simple yet effective strategy is fixed-size chunking, where we split the text based on a word or token count, ensuring some overlap between chunks to preserve context across boundaries.")
+    stmd.st_mermaid(mermaid_steps.format(step=7))
     st.markdown(f"#### DocumentChunker class")
     with st.expander("📄 View DocumentChunker Code", expanded=False):
         st.code('''
@@ -317,7 +343,7 @@ class DocumentChunker:
         "Company Name (for SEC User-Agent)",
         st.session_state.company_name,
         key="company_name_input",
-        help="The SEC requires a user agent string to identify your application. E.g., 'company_name Analytics'"
+        help="The SEC requires a user agent string to identify your application. E.g., 'SEC Analytics'"
     )
     st.session_state.email_address = st.text_input(
         "Email Address (for SEC User-Agent)",
@@ -387,6 +413,7 @@ elif st.session_state.current_page == 'Download & Process Filings':
             st.session_state.current_page = 'Configuration & Setup'
             st.rerun()
     else:
+        stmd.st_mermaid(mermaid_steps.format(step=0))
         st.markdown(f"### Filing Selection")
         st.markdown(
             f"Enter CIKs (Company Identification Numbers), one per line.")
@@ -428,7 +455,7 @@ elif st.session_state.current_page == 'Download & Process Filings':
 
         st.markdown(f"---")
         st.markdown(f"## Building the Document Registry for Deduplication")
-        st.markdown(f"Duplicate data is a common headache in data pipelines, leading to wasted processing, skewed analytics, and increased storage costs. For company_name Analytics, processing the same SEC filing multiple times would be inefficient and could lead to inconsistencies in our financial models. To combat this, we need a robust mechanism to identify and prevent the reprocessing of identical documents.")
+        st.markdown(f"Duplicate data is a common headache in data pipelines, leading to wasted processing, skewed analytics, and increased storage costs. For SEC Analytics, processing the same SEC filing multiple times would be inefficient and could lead to inconsistencies in our financial models. To combat this, we need a robust mechanism to identify and prevent the reprocessing of identical documents.")
         st.markdown(f"")
         st.markdown(f"The solution is a \"Document Registry\" that uses cryptographic hashing to generate a unique \"fingerprint\" for each document's content. We will use the SHA-256 algorithm, which takes an input (the document's text content) and produces a fixed-size, unique hash value. The probability of two different documents producing the same SHA-256 hash is astronomically small, making it ideal for deduplication.")
 
@@ -441,16 +468,17 @@ elif st.session_state.current_page == 'Download & Process Filings':
             r"3. It is computationally infeasible to find two different inputs $M_1 \neq M_2$ such that $H(M_1) = H(M_2)$ (collision resistance).")
 
         st.markdown(f"For SHA-256, the output is a 256-bit (64-character hexadecimal) string. We will store these hashes in our registry to quickly check if a document has already been processed.")
+        stmd.st_mermaid(mermaid_steps.format(step=6))
         st.markdown(f"---")
         st.markdown(f"## Crafting a Universal Document Parser (HTML & PDF)")
-        st.markdown(f"SEC filings come in various formats, primarily HTML and occasionally PDF, each with its own structural nuances. To make this raw data useful for company_name Analytics' AI models and analysts, we need to extract clean, readable text and structured tables, regardless of the original document format. This task is crucial for downstream natural language processing (NLP) and quantitative analysis.")
+        st.markdown(f"SEC filings come in various formats, primarily HTML and occasionally PDF, each with its own structural nuances. To make this raw data useful for SEC Analytics' AI models and analysts, we need to extract clean, readable text and structured tables, regardless of the original document format. This task is crucial for downstream natural language processing (NLP) and quantitative analysis.")
         st.markdown(f"")
         st.markdown(f"A robust `DocumentParser` needs to:")
         st.markdown(f"*   **HTML Parsing**: Navigate the often complex and inconsistently structured HTML of SEC filings, focusing on extracting the main textual content and identifying tables. Libraries like `BeautifulSoup` excel at this by providing an intuitive way to traverse the HTML DOM.")
         st.markdown(f"*   **PDF Parsing**: Handle PDF documents, which can be challenging due to their visual layout rather than semantic structure. Tools like `pdfplumber` or `PyMuPDF` (Fitz) are essential for extracting text, tables, and even layout information from PDFs.")
         st.markdown(f"")
         st.markdown(f"The goal is to produce \"clean text output\" – free of HTML tags, scripts, and extraneous formatting – and separate, structured tabular data.")
-
+        stmd.st_mermaid(mermaid_steps.format(step=5))
         with st.expander("📄 View DocumentParser Code", expanded=False):
             st.code('''
 class DocumentParser:
@@ -617,7 +645,7 @@ class DocumentParser:
                         limit=st.session_state.limit_input
                     ))
                     st.session_state.pipeline_report = report
-                    st.write(report)
+                    # st.write(report)
                     st.success(
                         "Pipeline execution completed! Move on to 'Processed Filings & Analysis' page to view results.")
 
@@ -678,8 +706,9 @@ class DocumentParser:
 elif st.session_state.current_page == 'Processed Filings & Analysis':
     st.markdown(
         f"# 3. Orchestrating the End-to-End SEC Data Pipeline and Reporting")
-    st.markdown(f"Now that we have all the individual components – the rate-limited downloader, the deduplication registry, the universal parser, and the smart chunker – it's time to integrate them into a seamless, end-to-end data pipeline. Your responsibility is to ensure that these modules work together harmoniously, transforming raw SEC filings into ready-to-use data for company_name Analytics. This final step involves orchestrating the entire workflow and generating a clear report of its operations, detailing what was processed, what was skipped, and any issues encountered.")
+    st.markdown(f"Now that we have all the individual components – the rate-limited downloader, the deduplication registry, the universal parser, and the smart chunker – it's time to integrate them into a seamless, end-to-end data pipeline. Your responsibility is to ensure that these modules work together harmoniously, transforming raw SEC filings into ready-to-use data for SEC Analytics. This final step involves orchestrating the entire workflow and generating a clear report of its operations, detailing what was processed, what was skipped, and any issues encountered.")
     st.markdown(f"---")
+    stmd.st_mermaid(mermaid_steps.format(step=8))
 
     with st.expander("📄 View SECPipeline Code", expanded=False):
         st.code(
@@ -842,7 +871,7 @@ class SECPipeline:
             # drop duplicates in the dataframe based on cik, filing_type, accession_number, keeping the last occurrence
             df_details = df_details.drop_duplicates(
                 subset=["cik", "filing_type"], keep="last")
-            st.dataframe(df_details, use_container_width=True,)
+            st.dataframe(df_details, width='stretch',)
 
         else:
             st.info("No processing details available.")

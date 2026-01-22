@@ -16,3 +16,4 @@ httpx
 structlog
 tqdm
 reportlab
+streamlit-mermaid
