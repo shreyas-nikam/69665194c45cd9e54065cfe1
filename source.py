@@ -1,784 +1,719 @@
-from typing import List, Dict, Optional, Any
-from unittest.mock import MagicMock, patch
-from typing import Tuple, List, Dict, Any
-import logging
-import asyncio
+from typing import List, Dict, Optional, Any, Tuple
+from pathlib import Path
 import hashlib
 import re
-import os
-import datetime
-from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple
+import asyncio
+import json
 
+import os
+import pdfkit
 from sec_edgar_downloader import Downloader
 from bs4 import BeautifulSoup
 import pdfplumber
 import fitz  # PyMuPDF
 import structlog
-import time
 from tqdm.asyncio import tqdm as async_tqdm
 
-# Configure logging for better visibility into pipeline operations
 logger = structlog.get_logger()
 
 
-class SECDownloader:
-    """
-    Downloads SEC filings with integrated rate limiting and stores them locally.
-    """
-    FILING_TYPES = ["10-K", "10-Q", "8-K", "DEF 14A"]
-    # SEC requests that you limit your requests to no more than 10 per second.
-    # To be conservative, we'll enforce 1 request every 0.1 seconds (10 req/s).
-    REQUEST_DELAY = 0.1  # seconds
+FILING_TYPES = [
+    "10-K", "10-Q", "8-K", "DEF 14A"
+]
+# ============================================================================
+# STEP 1: Initialize Pipeline
+# ============================================================================
 
-    def __init__(self, download_dir: str = "./sec_filings",
-                 company_name: str = "QuantInsight Analytics",
-                 email_address: str = "your_email@quantinsight.com"):
+
+class PipelineState:
+    """Holds the state of the pipeline across all steps."""
+
+    def __init__(self, company_name: str, email_address: str, download_dir: str = "./sec_filings"):
+        self.company_name = company_name
+        self.email_address = email_address
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(parents=True, exist_ok=True)
-        # Initialize the sec-edgar-downloader with user agent details
-        # The SEC requires a user agent string to identify your application.
-        self.downloader = Downloader(
-            company_name=company_name,
-            email_address=email_address,
-            download_folder=str(self.download_dir)
-        )
-        logger.info("SECDownloader initialized", download_dir=str(self.download_dir),
-                    company_name=company_name, email_address=email_address)
 
-    async def download_company_filings(
-        self,
-        cik: str,
-        filing_types: Optional[List[str]] = None,
-        after_date: Optional[str] = None,
-        limit: int = 10,
-    ) -> List[Dict[str, Any]]:
-        """
-        Downloads specified SEC filings for a given CIK, adhering to rate limits.
+        # Components (initialized in later steps)
+        self.downloader = None
+        self.registry = None
+        self.parser = None
+        self.chunker = None
 
-        Args:
-            cik (str): The CIK (Company Identification Number) of the company.
-            filing_types (Optional[List[str]]): List of filing types to download.
-                                                Defaults to all common types.
-            after_date (Optional[str]): Date string (YYYY-MM-DD) to download filings
-                                        after.
-            limit (int): Maximum number of filings to download for each type.
+        # Pipeline data
+        self.downloaded_filings = []
+        self.parsed_filings = []
+        self.deduplicated_filings = []
+        self.chunked_filings = []
 
-        Returns:
-            List[Dict[str, Any]]: A list of dictionaries, each describing a downloaded filing.
-        """
-        filing_types_to_download = filing_types or self.FILING_TYPES
-        results = []
+        # Summary
+        self.summary = {
+            "attempted_downloads": 0,
+            "unique_filings_processed": 0,
+            "skipped_duplicates": 0,
+            "parsing_errors": 0,
+            "details": []
+        }
 
-        logger.info("Starting download for company", cik=cik,
-                    filing_types=filing_types_to_download)
+        logger.info("Pipeline state initialized",
+                    company_name=company_name,
+                    email_address=email_address)
 
-        for filing_type in async_tqdm(filing_types_to_download, desc=f"Downloading {cik}"):
+
+def step1_initialize_pipeline(company_name: str, email_address: str,
+                              download_dir: str = "./sec_filings") -> PipelineState:
+    """
+    Step 1: Initialize the pipeline with company information.
+
+    Args:
+        company_name: Your company/organization name
+        email_address: Your contact email
+        download_dir: Directory to store downloaded filings
+
+    Returns:
+        PipelineState object containing all pipeline state
+    """
+    state = PipelineState(company_name, email_address, download_dir)
+    print(f"✓ Pipeline initialized for {company_name}")
+    return state
+
+
+# ============================================================================
+# STEP 2: Add Downloader
+# ============================================================================
+
+def step2_add_downloader(state: PipelineState) -> PipelineState:
+    """
+    Step 2: Initialize the SEC downloader component.
+
+    Args:
+        state: Current pipeline state
+
+    Returns:
+        Updated pipeline state with downloader initialized
+    """
+    state.downloader = Downloader(
+        company_name=state.company_name,
+        email_address=state.email_address,
+        download_folder=str(state.download_dir)
+    )
+    logger.info("SEC Downloader added to pipeline")
+    print("✓ SEC Downloader initialized")
+    return state
+
+
+# ============================================================================
+# STEP 3: Configure Rate Limiting
+# ============================================================================
+
+def step3_configure_rate_limiting(state: PipelineState,
+                                  request_delay: float = 0.1) -> PipelineState:
+    """
+    Step 3: Configure rate limiting for SEC requests.
+
+    Args:
+        state: Current pipeline state
+        request_delay: Delay between requests in seconds (default: 0.1s = 10 req/s)
+
+    Returns:
+        Updated pipeline state with rate limiting configured
+    """
+    state.request_delay = request_delay
+    logger.info("Rate limiting configured", request_delay=request_delay)
+    print(
+        f"✓ Rate limiting set to {request_delay}s between requests ({1/request_delay:.0f} req/s)")
+    return state
+
+
+# ============================================================================
+# STEP 4: Download Filings
+# ============================================================================
+
+
+def convert_filing_type(html_file_path: str, pdf_path: str) -> str:
+    # Convert HTML to PDF using pdfkit
+    with open(html_file_path, 'r') as f:
+        html_content = f.read()
+    options = {"load-error-handling": "ignore"}
+    pdfkit.from_string(html_content, pdf_path, options=options)
+    return pdf_path
+
+
+async def step4_download_filings(state: PipelineState,
+                                 ciks: List[str],
+                                 filing_types: Optional[List[str]] = None,
+                                 after_date: Optional[str] = None,
+                                 limit: int = 10) -> PipelineState:
+    """
+    Step 4: Download SEC filings for specified companies.
+
+    Args:
+        state: Current pipeline state
+        ciks: List of CIK numbers to download
+        filing_types: List of filing types (e.g., ["10-K", "10-Q"])
+        after_date: Download filings after this date (YYYY-MM-DD)
+        limit: Maximum number of filings per type per CIK
+
+    Returns:
+        Updated pipeline state with downloaded filings metadata
+    """
+    if not state.downloader:
+        raise ValueError(
+            "Downloader not initialized. Run step2_add_downloader first.")
+
+    filing_types = filing_types or ["10-K", "10-Q", "8-K", "DEF 14A"]
+    state.downloaded_filings = []
+
+    for cik in async_tqdm(ciks, desc="Downloading CIKs"):
+        state.summary["attempted_downloads"] += len(filing_types) * limit
+
+        for filing_type in filing_types:
             try:
-                # Enforce rate limit before each download request
-                await asyncio.sleep(self.REQUEST_DELAY)
+                # Rate limiting
+                await asyncio.sleep(state.request_delay)
 
-                logger.debug("Attempting to download", cik=cik, filing_type=filing_type,
-                             after_date=after_date, limit=limit)
+                # Download
+                state.downloader.get(
+                    filing_type, cik, after=after_date, limit=limit)
 
-                self.downloader.get(
-                    filing_type,
-                    cik,
-                    after=after_date,
-                    limit=limit,
-                )
-
-                # After successful download, find the paths to the downloaded files
-                company_type_dir = self.download_dir / "sec-edgar-filings" / cik / filing_type
+                # Find downloaded files
+                company_type_dir = state.download_dir / "sec-edgar-filings" / cik / filing_type
                 if company_type_dir.exists():
-                    for accession_number_dir in company_type_dir.iterdir():
-                        if accession_number_dir.is_dir():
-                            # Find the actual filing file (usually an HTML or PDF)
+                    for accession_dir in company_type_dir.iterdir():
+                        if accession_dir.is_dir():
+                            # Find filing file
                             html_file = next(
-                                accession_number_dir.glob("*.html"), None)
-                            pdf_file = next(
-                                accession_number_dir.glob("*.pdf"), None)
-                            txt_file = next(
-                                accession_number_dir.glob("*.txt"), None)
+                                accession_dir.glob("*.html"), None)
+                            pdf_file = next(accession_dir.glob("*.pdf"), None)
+                            txt_file = next(accession_dir.glob("*.txt"), None)
                             file_path = html_file or pdf_file or txt_file
-                            if file_path:
-                                results.append({
+
+                            if txt_file:
+                                txt_content = open(txt_file, "r").read()
+                                txt_content = txt_content[:txt_content.index("</html>")+7]
+                                with open(txt_file, "w") as f:
+                                    f.write(txt_content)
+                                
+                                html_file = Path(txt_file).with_suffix(".html")
+                                with open(html_file, "w") as f:
+                                    f.write(txt_content)
+                                state.downloaded_filings.append({
                                     "cik": cik,
                                     "filing_type": filing_type,
-                                    "accession_number": accession_number_dir.name,
-                                    "path": str(file_path),
-                                    "processed_hash": None  # Placeholder for later deduplication
+                                    "accession_number": accession_dir.name,
+                                    "path": str(html_file)
                                 })
-                            else:
-                                logger.warning("No HTML or PDF found in downloaded directory",
-                                               path=str(accession_number_dir))
+                                
+                                try:
+                                    print("Converting HTML to PDF:", html_file)
+                                    pdf_file = str(
+                                        html_file.with_suffix('.pdf'))
 
-                logger.info("Filings downloaded successfully", cik=cik, filing_type=filing_type,
-                            count=len([r for r in results if r['cik'] == cik and r['filing_type'] == filing_type]))
+                                    convert_filing_type(
+                                        Path(html_file).absolute(), pdf_file)
+                                except Exception as e:
+                                    logger.error("Conversion to PDF failed",
+                                                 filing=str(html_file), error=str(e))
+                            # print(pdf_file, os.path.exists(pdf_file))
+                            if os.path.exists(pdf_file):
+                                state.downloaded_filings.append({
+                                        "cik": cik,
+                                        "filing_type": filing_type,
+                                        "accession_number": accession_dir.name,
+                                        "path": str(pdf_file)
+                                    })
+
+                logger.info("Downloaded filings", cik=cik,
+                            filing_type=filing_type)
 
             except Exception as e:
-                logger.error("Download failed for filing type",
-                             cik=cik, filing_type=filing_type, error=str(e))
+                logger.error("Download failed", cik=cik,
+                             filing_type=filing_type, error=str(e))
 
-        return results
-
-# Example Usage:
-# We'll use a couple of well-known CIKs for demonstration
-# Apple Inc.: 0000320193
-# Microsoft Corp: 0000789019
-# Tesla Inc.: 0001318605
+    print(f"✓ Downloaded {len(state.downloaded_filings)} filings")
+    return state
 
 
-async def run_downloader_demo():
-    sec_downloader = SECDownloader()
-    sample_ciks = ["0000320193", "0000789019"]  # Apple and Microsoft
-    sample_filing_types = ["10-K", "10-Q"]
-
-    # Download 2 latest 10-K and 10-Q filings for each company
-    # We'll use a specific after_date to ensure we get recent filings for demonstration
-    # Note: sec-edgar-downloader automatically creates a structured directory.
-    # We will then find the actual file paths within those directories.
-
-    all_downloaded_filings = []
-    for cik in sample_ciks:
-        downloaded_filings = await sec_downloader.download_company_filings(
-            cik=cik,
-            filing_types=sample_filing_types,
-            after_date="2022-01-01",
-            limit=2
-        )
-        all_downloaded_filings.extend(downloaded_filings)
-
-    logger.info("Finished downloading all sample filings.")
-    return all_downloaded_filings
-
-# downloaded_filings_metadata = await run_downloader_demo()
-
-
-class DocumentRegistry:
-    """
-    Manages the registry of processed documents using content hashes for deduplication.
-    """
-
-    def __init__(self, registry_file: str = "document_registry.txt"):
-        self.registry_file = Path(registry_file)
-        self.processed_hashes = set()
-        self._load_registry()
-        logger.info("DocumentRegistry initialized",
-                    registry_file=str(self.registry_file))
-
-    def _load_registry(self):
-        """Loads processed hashes from a file into memory."""
-        if self.registry_file.exists():
-            with open(self.registry_file, 'r') as f:
-                for line in f:
-                    self.processed_hashes.add(line.strip())
-            logger.info("Loaded existing registry",
-                        count=len(self.processed_hashes))
-
-    def _save_registry(self):
-        """Saves current processed hashes to the file."""
-        with open(self.registry_file, 'w') as f:
-            for h in self.processed_hashes:
-                f.write(h + '\n')
-        logger.info("Registry saved", count=len(self.processed_hashes))
-
-    def compute_content_hash(self, content: str) -> str:
-        """
-        Computes the SHA-256 hash of the given string content.
-
-        Args:
-            content (str): The text content of the document.
-
-        Returns:
-            str: The SHA-256 hash in hexadecimal format.
-        """
-        return hashlib.sha256(content.encode('utf-8')).hexdigest()
-
-    def is_processed(self, content_hash: str) -> bool:
-        """
-        Checks if a document with the given hash has already been processed.
-
-        Args:
-            content_hash (str): The SHA-256 hash of the document content.
-
-        Returns:
-            bool: True if processed, False otherwise.
-        """
-        return content_hash in self.processed_hashes
-
-    def mark_as_processed(self, content_hash: str):
-        """
-        Adds a content hash to the registry, marking the document as processed.
-
-        Args:
-            content_hash (str): The SHA-256 hash of the document content.
-        """
-        if content_hash not in self.processed_hashes:
-            self.processed_hashes.add(content_hash)
-            self._save_registry()  # Persist the registry change
-
-
-# --- Example Usage ---
-# document_registry = DocumentRegistry()
-
-# # Simulate some document content
-# doc_content_1 = "This is the content of financial report A for Q1."
-# doc_content_2 = "This is the content of financial report B for Q2."
-# # Identical to doc_content_1
-# doc_content_1_duplicate = "This is the content of financial report A for Q1."
-# # Different due to trailing space
-# doc_content_3_diff_spacing = "This is the content of financial report A for Q1. "
-
-# hash_1 = document_registry.compute_content_hash(doc_content_1)
-# hash_2 = document_registry.compute_content_hash(doc_content_2)
-# hash_1_dup = document_registry.compute_content_hash(doc_content_1_duplicate)
-# hash_3_diff = document_registry.compute_content_hash(
-#     doc_content_3_diff_spacing)
-
-# print(f"Hash for Doc 1: {hash_1}")
-# print(f"Hash for Doc 2: {hash_2}")
-# print(f"Hash for Doc 1 (duplicate): {hash_1_dup}")
-# print(f"Hash for Doc 3 (diff spacing): {hash_3_diff}")
-
-# # Test deduplication logic
-# print(f"\nIs Doc 1 processed? {document_registry.is_processed(hash_1)}")
-
-# document_registry.mark_as_processed(hash_1)
-
-# print(
-#     f"Is Doc 1 processed after marking? {document_registry.is_processed(hash_1)}")
-# # Should be True
-# print(
-#     f"Is Doc 1 duplicate processed? {document_registry.is_processed(hash_1_dup)}")
-# print(f"Is Doc 2 processed? {document_registry.is_processed(hash_2)}")
-# print(f"Is Doc 3 processed? {document_registry.is_processed(hash_3_diff)}")
-
-# # Verify the registry file content
-# with open(document_registry.registry_file, 'r') as f:
-#     print("\nRegistry file content:")
-#     for line in f:
-#         print(line.strip())
-# Assuming these libraries are installed and imported in the full environment
-# from bs4 import BeautifulSoup
-# import pdfplumber
-# import fitz  # PyMuPDF
-# import logging
-
-# logger = logging.getLogger(__name__)
-
+# ============================================================================
+# STEP 5: Parse Documents
+# ============================================================================
 
 class DocumentParser:
-    """
-    Parses SEC filings (HTML and PDF) to extract clean text and tabular data.
-    """
+    """Parses SEC filings to extract text and tables."""
 
     def __init__(self):
         logger.info("DocumentParser initialized")
 
     def _parse_html(self, file_path: Path) -> Tuple[str, List[Dict[str, Any]]]:
-        """Extracts text and tables from an HTML file."""
-        # if the path is a .txt file, save it as a .html file
-        if file_path.suffix == '.txt':
-            new_html_path = file_path.with_suffix('.html')
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as txt_file:
-                html_content = txt_file.read()
-            with open(new_html_path, 'w', encoding='utf-8', errors='ignore') as html_file:
-                html_file.write(html_content)
-            file_path = new_html_path
+        """Extract text and tables from HTML."""
 
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             soup = BeautifulSoup(f, 'lxml')
 
-        # Remove script and style elements
-        for script_or_style in soup(['script', 'style']):
-            script_or_style.extract()
+        # Remove scripts and styles
+        for element in soup(['script', 'style']):
+            element.extract()
 
-        # Get text
+        # Extract text
         text = soup.get_text(separator='\n')
-        # Clean up whitespace and empty lines
         text = re.sub(r'\n\s*\n', '\n', text).strip()
 
-        # Extract tables (simplified for demonstration)
+        # Extract tables
         tables_data = []
-        for table_tag in soup.find_all('table'):
-            headers = [th.get_text(strip=True)
-                       for th in table_tag.find_all('th')]
+        for table in soup.find_all('table'):
+            headers = [th.get_text(strip=True) for th in table.find_all('th')]
             rows = []
-            for tr_tag in table_tag.find_all('tr'):
-                # Exclude header rows if they are also found as tr
-                if tr_tag.find('th'):
+            for tr in table.find_all('tr'):
+                if tr.find('th'):
                     continue
-                cells = [td.get_text(strip=True)
-                         for td in tr_tag.find_all('td')]
+                cells = [td.get_text(strip=True) for td in tr.find_all('td')]
                 if cells:
-                    # Only add if it's a data row
                     rows.append(cells)
 
             if headers and rows:
-                # Only add if we found both headers and rows
                 tables_data.append({"headers": headers, "rows": rows})
-            elif rows and not headers:
-                # Sometimes tables might not have th tags, but still have rows
+            elif rows:
                 tables_data.append({"rows": rows})
 
         return text, tables_data
 
     def _parse_pdf(self, file_path: Path) -> Tuple[str, List[Dict[str, Any]]]:
-        """Extracts text and tables from a PDF file using pdfplumber and PyMuPDF."""
+        """Extract text and tables from PDF."""
         full_text = []
         tables_data = []
 
-        # Use pdfplumber for table extraction, PyMuPDF for robust text extraction
+        # Use pdfplumber
         with pdfplumber.open(file_path) as pdf:
             for page_num, page in enumerate(pdf.pages):
-                # Extract text using pdfplumber's extract_text (can be good for layout)
                 page_text = page.extract_text(x_tolerance=2, y_tolerance=2)
                 if page_text:
                     full_text.append(page_text)
 
-                # Extract tables using pdfplumber
+                # Extract tables
                 page_tables = page.extract_tables()
                 if page_tables:
                     for table in page_tables:
-                        # Convert list of lists (table) to dictionary for consistency
-                        if table and table[0]:  # Ensure table and header row exist
+                        if table and table[0]:
                             headers = table[0]
                             rows = table[1:]
                             tables_data.append(
                                 {"page": page_num + 1, "headers": headers, "rows": rows})
                         elif table:
-                            # If no explicit headers, just provide rows
                             tables_data.append(
                                 {"page": page_num + 1, "rows": table})
 
-        # Fallback/additional text extraction for potentially missed text by pdfplumber
-        # Or if we want more granular control over text extraction using PyMuPDF
+        # Fallback to PyMuPDF if needed
         try:
             doc = fitz.open(file_path)
-            pymupdf_text = []
-            for page in doc:
-                pymupdf_text.append(page.get_text("text"))
+            pymupdf_text = [page.get_text("text") for page in doc]
             doc.close()
 
-            # Combine or prioritize text, here we'll just append if pdfplumber was sparse
-            if not full_text:
-                # If pdfplumber didn't get much, use pymupdf
-                full_text = pymupdf_text
-            elif len("".join(full_text)) < len("".join(pymupdf_text)):
-                # If pymupdf got more text
+            if not full_text or len("".join(full_text)) < len("".join(pymupdf_text)):
                 full_text = pymupdf_text
         except Exception as e:
-            logger.warning(
-                f"PyMuPDF text extraction failed for {file_path}: {e}")
+            logger.warning(f"PyMuPDF extraction failed: {e}")
 
         final_text = "\n".join(full_text).strip()
-        # Clean up whitespace
         final_text = re.sub(r'\n\s*\n', '\n', final_text)
         return final_text, tables_data
 
     def parse_filing(self, file_path: str) -> Dict[str, Any]:
-        """
-        Parses a given filing file based on its extension (HTML or PDF).
-
-        Args:
-            file_path (str): The path to the filing file.
-
-        Returns:
-            Dict[str, Any]: A dictionary containing 'text' and 'tables' extracted.
-        """
+        """Parse a filing file based on extension."""
         path = Path(file_path)
-        extracted_text = ""
-        extracted_tables = []
 
-        if path.suffix == '.html':
-            logger.debug(f"Parsing HTML file: {file_path}")
-            extracted_text, extracted_tables = self._parse_html(path)
+        if path.suffix in ['.html', '.txt']:
+            print("Parsing HTML file:", file_path)
+            text, tables = self._parse_html(path)
         elif path.suffix == '.pdf':
-            logger.debug(f"Parsing PDF file: {file_path}")
-            extracted_text, extracted_tables = self._parse_pdf(path)
-        elif path.suffix == '.txt':
-            logger.debug(f"Parsing TXT file as HTML: {file_path}")
-            extracted_text, extracted_tables = self._parse_html(path)
+            print("Parsing PDF file:", file_path)
+            text, tables = self._parse_pdf(path)
         else:
-            logger.warning(f"Unsupported file type for parsing: {file_path}")
-            extracted_text = f"Content for {path.name} (unsupported type)"
+            logger.warning(f"Unsupported file type: {file_path}")
+            text = f"Content for {path.name} (unsupported type)"
+            tables = []
 
-        return {"text": extracted_text, "tables": extracted_tables}
+        return {"text": text, "tables": tables}
 
 
-# --- Example Usage ---
-# document_parser = DocumentParser()
+async def step5_parse_documents(state: PipelineState) -> PipelineState:
+    """
+    Step 5: Parse downloaded documents to extract text and tables.
 
-# # To demonstrate, we need an actual HTML and potentially a PDF file.
-# # We'll use one of the downloaded HTML files and simulate a PDF.
+    Args:
+        state: Current pipeline state with downloaded filings
 
-# # Use the first downloaded HTML filing for demonstration
-# if downloaded_filings_metadata:
-#     html_file_path = downloaded_filings_metadata[0]["path"]
-#     # if the path is a .txt file, save it as a .html file
-#     if html_file_path.endswith(".txt"):
-#         with open(html_file_path, 'r') as txt_file:
-#             html_content = txt_file.read()
-#             html_file_path = html_file_path.replace(".txt", ".html")
-#             with open(html_file_path, 'w') as html_file:
-#                 html_file.write(html_content)
+    Returns:
+        Updated pipeline state with parsed content
+    """
+    if not state.downloaded_filings:
+        raise ValueError(
+            "No downloaded filings. Run step4_download_filings first.")
 
-#     logger.info(f"Using sample HTML file: {html_file_path}")
+    state.parser = DocumentParser()
+    state.parsed_filings = []
 
-#     print(f"Parsing sample HTML file: {html_file_path}")
-#     parsed_html_content = document_parser.parse_filing(html_file_path)
+    for filing in async_tqdm(state.downloaded_filings, desc="Parsing documents"):
+        try:
+            parsed = state.parser.parse_filing(filing["path"])
 
-#     print("\n--- Extracted HTML Text Sample (first 500 chars) ---")
-#     print(parsed_html_content['text'][:500])
+            if not parsed["text"]:
+                raise ValueError(f"No text extracted from {filing['path']}")
 
-#     print("\n--- Extracted HTML Tables Sample ---")
-#     if parsed_html_content['tables']:
-#         print(f"Found {len(parsed_html_content['tables'])} tables.")
-#         print(parsed_html_content['tables'][0])
-#     else:
-#         print("No tables extracted from HTML sample.")
+            filing["parsed_text"] = parsed["text"]
+            filing["parsed_tables"] = parsed["tables"]
+            state.parsed_filings.append(filing)
 
-# # Simulate a PDF file for parsing demonstration
-# # In a real scenario, this PDF would be part of the SEC filings or linked within HTML
-# synthetic_pdf_path = Path("./sec_filings/sample_report.pdf")
+        except Exception as e:
+            state.summary["parsing_errors"] += 1
+            logger.error("Parsing failed", filing=filing["path"], error=str(e))
+            state.summary["details"].append({
+                "cik": filing["cik"],
+                "filing_type": filing["filing_type"],
+                "accession_number": filing["accession_number"],
+                "status": "parsing_failed",
+                "error": str(e)
+            })
+            raise e
 
-# # Create a dummy PDF file for testing
-# if not synthetic_pdf_path.exists():
-#     import reportlab
-#     from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle
-#     from reportlab.lib.styles import getSampleStyleSheet
-#     from reportlab.lib import colors
+    print(
+        f"✓ Parsed {len(state.parsed_filings)} documents ({state.summary['parsing_errors']} errors)")
+    return state
 
-#     doc = SimpleDocTemplate(str(synthetic_pdf_path))
-#     styles = getSampleStyleSheet()
-#     story = []
 
-#     story.append(Paragraph("Sample Financial Overview", styles['h1']))
-#     story.append(Paragraph(
-#         "This is a simulated PDF financial report for demonstration purposes. It contains some text and a small table.", styles['Normal']))
-#     story.append(Paragraph("Key metrics for Q1 2023:", styles['h2']))
+# ============================================================================
+# STEP 6: Deduplicate Documents
+# ============================================================================
 
-#     data = [['Metric', 'Value'],
-#             ['Revenue', '$100M'],
-#             ['Net Income', '$15M'],
-#             ['EPS', '$1.25']]
+class DocumentRegistry:
+    """Manages document deduplication using content hashes."""
 
-#     table = Table(data)
-#     table.setStyle(TableStyle([
-#         ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-#         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-#         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-#         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-#         ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-#         ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-#         ('GRID', (0, 0), (-1, -1), 1, colors.black)
-#     ]))
-#     story.append(table)
-#     story.append(Paragraph(
-#         "Further details can be found in the accompanying HTML filing.", styles['Normal']))
+    def __init__(self, registry_file: str = "document_registry.txt"):
+        self.registry_file = Path(registry_file)
+        self.processed_hashes = set()
+        self._load_registry()
 
-#     doc.build(story)
-#     print(f"\nCreated synthetic PDF: {synthetic_pdf_path}")
-# else:
-#     print(f"\nUsing existing synthetic PDF: {synthetic_pdf_path}")
+    def _load_registry(self):
+        if self.registry_file.exists():
+            with open(self.registry_file, 'r') as f:
+                self.processed_hashes = {line.strip() for line in f}
+            logger.info("Loaded registry", count=len(self.processed_hashes))
 
-# print(f"Parsing synthetic PDF file: {synthetic_pdf_path}")
-# parsed_pdf_content = document_parser.parse_filing(str(synthetic_pdf_path))
+    def _save_registry(self):
+        with open(self.registry_file, 'w') as f:
+            for h in self.processed_hashes:
+                f.write(h + '\n')
 
-# print("\n--- Extracted PDF Text Sample (first 500 chars) ---")
-# print(parsed_pdf_content['text'][:500])
+    def compute_content_hash(self, content: str) -> str:
+        return hashlib.sha256(content.encode('utf-8')).hexdigest()
 
-# print("\n--- Extracted PDF Tables Sample ---")
-# if parsed_pdf_content['tables']:
-#     print(f"Found {len(parsed_pdf_content['tables'])} tables.")
-#     print(parsed_pdf_content['tables'][0])
-# else:
-#     print("No tables extracted from PDF sample.")
+    def is_processed(self, content_hash: str) -> bool:
+        return content_hash in self.processed_hashes
 
-# # Clean up synthetic PDF
-# if synthetic_pdf_path.exists():
-#     synthetic_pdf_path.unlink()
-#     logger.info("Cleaned up synthetic PDF file.")
+    def mark_as_processed(self, content_hash: str):
+        if content_hash not in self.processed_hashes:
+            self.processed_hashes.add(content_hash)
+            self._save_registry()
 
+
+def step6_deduplicate_documents(state: PipelineState,
+                                registry_file: str = "document_registry.txt") -> PipelineState:
+    """
+    Step 6: Remove duplicate documents based on content hash.
+
+    Args:
+        state: Current pipeline state with parsed filings
+        registry_file: Path to registry file for tracking processed documents
+
+    Returns:
+        Updated pipeline state with deduplicated filings
+    """
+    if not state.parsed_filings:
+        raise ValueError("No parsed filings. Run step5_parse_documents first.")
+
+    state.registry = DocumentRegistry(registry_file)
+    state.deduplicated_filings = []
+    skipped = 0
+
+    for filing in state.parsed_filings:
+        content_hash = state.registry.compute_content_hash(
+            filing["parsed_text"])
+        filing["content_hash"] = content_hash
+
+        if state.registry.is_processed(content_hash):
+            skipped += 1
+            state.summary["skipped_duplicates"] += 1
+            state.summary["details"].append({
+                "cik": filing["cik"],
+                "filing_type": filing["filing_type"],
+                "accession_number": filing["accession_number"],
+                "status": "duplicate_skipped",
+                "content_hash": content_hash
+            })
+            logger.info("Skipped duplicate", hash=content_hash[:16])
+        else:
+            state.registry.mark_as_processed(content_hash)
+            state.deduplicated_filings.append(filing)
+
+    print(
+        f"✓ Deduplicated: {len(state.deduplicated_filings)} unique documents ({skipped} duplicates removed)")
+    return state
+
+
+# ============================================================================
+# STEP 7: Chunk Text
+# ============================================================================
 
 class DocumentChunker:
-    """
-    Splits document text into manageable, context-rich chunks for AI models.
-    """
+    """Splits documents into manageable chunks."""
 
     def __init__(self, chunk_size: int = 750, chunk_overlap: int = 50):
-        """
-        Initializes the DocumentChunker.
-
-        Args:
-            chunk_size (int): The target size of each chunk in words.
-            chunk_overlap (int): The number of words to overlap between consecutive chunks.
-        """
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         logger.info("DocumentChunker initialized",
                     chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
-    def _split_text_into_words(self, text: str) -> List[str]:
-        """Splits text into words, handling common punctuation."""
-        # Simple split by whitespace, then filter out empty strings
-        words = text.split()
-        return words
-
-    def chunk_document(self, document_text: str) -> List[str]:
-        """
-        Splits a document's text content into smaller, overlapping chunks.
-
-        Args:
-            document_text (str): The full text content of the document.
-
-        Returns:
-            List[str]: A list of text chunks.
-        """
-        if not document_text:
+    def chunk_document(self, text: str) -> List[str]:
+        if not text:
             return []
 
-        words = self._split_text_into_words(document_text)
-        total_words = len(words)
+        words = text.split()
         chunks = []
-
         start_idx = 0
-        while start_idx < total_words:
-            end_idx = min(start_idx + self.chunk_size, total_words)
+
+        while start_idx < len(words):
+            end_idx = min(start_idx + self.chunk_size, len(words))
             chunk = " ".join(words[start_idx:end_idx])
             chunks.append(chunk)
 
-            # Move start_idx for next chunk, considering overlap
             start_idx += (self.chunk_size - self.chunk_overlap)
-            # Ensure the last chunk isn't tiny due to aggressive overlap
-            if start_idx >= total_words and self.chunk_overlap > 0:
-                if (total_words - (start_idx - (self.chunk_size - self.chunk_overlap))) < self.chunk_overlap:
-                    break  # Avoid creating a very small overlapping last chunk
 
-        logger.debug(f"Chunked document into {len(chunks)} pieces.")
+            if start_idx >= len(words):
+                break
+
         return chunks
 
 
-# Example Usage:
-# Aim for 800-word chunks with 100-word overlap
-# document_chunker = DocumentChunker(chunk_size=800, chunk_overlap=100)
-
-# # Use the text from the previously parsed HTML document
-# if downloaded_filings_metadata and parsed_html_content['text']:
-#     sample_text = parsed_html_content['text']
-#     print(
-#         f"Original document length (words): {len(document_chunker._split_text_into_words(sample_text))}")
-
-#     document_chunks = document_chunker.chunk_document(sample_text)
-#     print(f"\nNumber of chunks created: {len(document_chunks)}")
-
-#     if document_chunks:
-#         print("\n--- First Chunk (first 500 chars) ---")
-#         print(document_chunks[0][:500])
-#         print(
-#             f"Length of first chunk (words): {len(document_chunker._split_text_into_words(document_chunks[0]))}")
-
-#     if len(document_chunks) > 1:
-#         print("\n--- Second Chunk (first 500 chars) ---")
-#         print(document_chunks[1][:500])
-#         print(
-#             f"Length of second chunk (words): {len(document_chunker._split_text_into_words(document_chunks[1]))}")
-
-#     # Demonstrate overlap (conceptually) by finding a common phrase
-#     # For exact overlap validation, one would compare words.
-#     # Here, we just observe if the start of chunk 2 looks like the end of chunk 1.
-#     print("\n--- Conceptual Overlap Check ---")
-#     first_chunk_words = document_chunker._split_text_into_words(
-#         document_chunks[0])
-#     second_chunk_words = document_chunker._split_text_into_words(
-#         document_chunks[1])
-
-#     if len(first_chunk_words) > document_chunker.chunk_overlap and \
-#        len(second_chunk_words) > document_chunker.chunk_overlap:
-#         print(
-#             f"End of first chunk (last {document_chunker.chunk_overlap} words): {' '.join(first_chunk_words[-document_chunker.chunk_overlap:])[:200]}...")
-#         print(
-#             f"Start of second chunk (first {document_chunker.chunk_overlap} words): {' '.join(second_chunk_words[:document_chunker.chunk_overlap])[:200]}...")
-# else:
-#     print("No parsed text available for chunking demonstration. Please ensure previous steps ran successfully.")
-# Assuming tqdm is installed: from tqdm.asyncio import tqdm as async_tqdm
-# and previous classes (SECDownloader, DocumentRegistry, etc.) are available.
-
-
-class SECPipeline:
+async def step7_chunk_text(state: PipelineState,
+                           chunk_size: int = 750,
+                           chunk_overlap: int = 50) -> PipelineState:
     """
-    Orchestrates the end-to-end SEC data ingestion pipeline.
-    """
+    Step 7: Split document text into manageable chunks.
 
-    def __init__(self, download_dir: str = "./sec_filings", registry_file: str = "document_registry.txt", chunk_size: int = 750, chunk_overlap: int = 50, company_name: str = "QuantInsight Analytics", email_address: str = "your_email@quantinsight.com"):
-        self.downloader = SECDownloader(
-            download_dir=download_dir, company_name=company_name, email_address=email_address)
-        self.registry = DocumentRegistry(registry_file=registry_file)
-        self.parser = DocumentParser()
-        self.chunker = DocumentChunker(
-            chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        self.download_dir = Path(download_dir)
-        self.processed_summary = {
-            "attempted_downloads": 0,
-            "unique_filings_processed": 0,
-            "skipped_duplicates": 0,
-            "parsing_errors": 0,
-            "chunking_errors": 0,
-            "details": []
+    Args:
+        state: Current pipeline state with deduplicated filings
+        chunk_size: Target size of each chunk in words
+        chunk_overlap: Number of words to overlap between chunks
+
+    Returns:
+        Updated pipeline state with chunked documents
+    """
+    if not state.deduplicated_filings:
+        raise ValueError(
+            "No deduplicated filings. Run step6_deduplicate_documents first.")
+
+    state.chunker = DocumentChunker(chunk_size, chunk_overlap)
+    state.chunked_filings = []
+
+    for filing in async_tqdm(state.deduplicated_filings, desc="Chunking documents"):
+        try:
+            chunks = state.chunker.chunk_document(filing["parsed_text"])
+
+            if not chunks:
+                raise ValueError(f"No chunks generated for {filing['path']}")
+
+            filing["chunks"] = chunks
+            filing["num_chunks"] = len(chunks)
+            state.chunked_filings.append(filing)
+
+            state.summary["unique_filings_processed"] += 1
+            state.summary["details"].append({
+                "cik": filing["cik"],
+                "filing_type": filing["filing_type"],
+                "accession_number": filing["accession_number"],
+                "status": "success",
+                "num_chunks": len(chunks),
+                "parsed_tables": filing.get("parsed_tables"),
+                "num_tables": len(filing.get("parsed_tables", [])),
+                "content_hash": filing["content_hash"]
+            })
+
+        except Exception as e:
+            logger.error("Chunking failed",
+                         filing=filing["path"], error=str(e))
+            state.summary["details"].append({
+                "cik": filing["cik"],
+                "filing_type": filing["filing_type"],
+                "accession_number": filing["accession_number"],
+                "status": "chunking_failed",
+                "error": str(e)
+            })
+
+    print(f"✓ Chunked {len(state.chunked_filings)} documents into chunks")
+    return state
+
+
+# ============================================================================
+# STEP 8: Build Pipeline (Validation)
+# ============================================================================
+
+def step8_build_pipeline(state: PipelineState) -> PipelineState:
+    """
+    Step 8: Validate pipeline and prepare for final output.
+
+    Args:
+        state: Current pipeline state
+
+    Returns:
+        Validated pipeline state
+    """
+    # Validate all components are ready
+    if not state.chunked_filings:
+        raise ValueError(
+            "Pipeline incomplete. Ensure all previous steps completed successfully.")
+
+    print("✓ Pipeline built successfully")
+    print(f"  - Total filings processed: {len(state.chunked_filings)}")
+    print(
+        f"  - Total chunks created: {sum(f['num_chunks'] for f in state.chunked_filings)}")
+    print(f"  - Duplicates skipped: {state.summary['skipped_duplicates']}")
+    print(f"  - Parsing errors: {state.summary['parsing_errors']}")
+
+    return state
+
+
+# ============================================================================
+# STEP 9: Generate Report and Files
+# ============================================================================
+
+def step9_generate_report(state: PipelineState,
+                          output_dir: str = "./pipeline_output") -> Dict[str, Any]:
+    """
+    Step 9: Generate final report and export processed data.
+
+    Args:
+        state: Completed pipeline state
+        output_dir: Directory to save output files
+
+    Returns:
+        Summary report dictionary
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # Generate report
+    report = {
+        "pipeline_summary": {
+            "attempted_downloads": state.summary["attempted_downloads"],
+            "unique_filings_processed": state.summary["unique_filings_processed"],
+            "skipped_duplicates": state.summary["skipped_duplicates"],
+            "parsing_errors": state.summary["parsing_errors"],
+            "total_chunks": sum(f.get("num_chunks", 0) for f in state.chunked_filings)
+        },
+        "filings": []
+    }
+
+    # Export chunked data
+    for filing in state.chunked_filings:
+        filing_data = {
+            "cik": filing["cik"],
+            "filing_type": filing["filing_type"],
+            "accession_number": filing["accession_number"],
+            "content_hash": filing["content_hash"],
+            "num_chunks": filing["num_chunks"],
+            "num_tables": len(filing.get("parsed_tables", [])),
+            "parsed_tables": filing.get("parsed_tables"),
+            "chunks": filing["chunks"]
         }
-        logger.info("SECPipeline initialized")
+        report["filings"].append(filing_data)
 
-    async def run_pipeline(
-        self,
-        ciks: List[str],
-        filing_types: Optional[List[str]] = None,
-        after_date: Optional[str] = None,
-        limit: int = 1,
-    ) -> Dict[str, Any]:
-        """
-        Runs the full SEC data ingestion pipeline for specified CIKs and filing types.
+        # Save individual filing data
+        filing_output = output_path / \
+            f"{filing['cik']}_{filing['filing_type']}_{filing['accession_number']}.json"
+        with open(filing_output, 'w') as f:
+            json.dump(filing_data, f, indent=2)
 
-        Args:
-            ciks (List[str]): List of CIKs to process.
-            filing_types (Optional[List[str]]): List of filing types to download.
-            after_date (Optional[str]): Date string (YYYY-MM-DD) to download filings after.
-            limit (int): Maximum number of filings to download for each type per CIK.
+    # Save complete report
+    report_file = output_path / "pipeline_report.json"
+    with open(report_file, 'w') as f:
+        json.dump(report, f, indent=2)
 
-        Returns:
-            Dict[str, Any]: A summary report of the pipeline execution.
-        """
-        logger.info("Starting full SEC pipeline run")
-        all_download_metadata = []
+    # Save summary text
+    summary_file = output_path / "summary.txt"
+    with open(summary_file, 'w') as f:
+        f.write("="*60 + "\n")
+        f.write("SEC EDGAR Pipeline Summary Report\n")
+        f.write("="*60 + "\n\n")
+        f.write(
+            f"Attempted downloads: {report['pipeline_summary']['attempted_downloads']}\n")
+        f.write(
+            f"Unique filings processed: {report['pipeline_summary']['unique_filings_processed']}\n")
+        f.write(
+            f"Duplicates skipped: {report['pipeline_summary']['skipped_duplicates']}\n")
+        f.write(
+            f"Parsing errors: {report['pipeline_summary']['parsing_errors']}\n")
+        f.write(
+            f"Total chunks created: {report['pipeline_summary']['total_chunks']}\n\n")
+        f.write("="*60 + "\n")
+        f.write("Filing Details\n")
+        f.write("="*60 + "\n\n")
+        for detail in state.summary["details"]:
+            f.write(f"CIK: {detail['cik']}, Type: {detail['filing_type']}, "
+                    f"Acc #: {detail['accession_number']}, Status: {detail['status']}\n")
 
-        # 1. Download Stage
-        for cik in async_tqdm(ciks, desc="Processing CIKs"):
-            self.processed_summary["attempted_downloads"] += (
-                len(filing_types or self.downloader.FILING_TYPES) * limit)
-            download_results = await self.downloader.download_company_filings(
-                cik=cik,
-                filing_types=filing_types,
-                after_date=after_date,
-                limit=limit
-            )
-            all_download_metadata.extend(download_results)
+    print(f"\n✓ Report generated in {output_dir}/")
+    print(f"  - Summary: {summary_file}")
+    print(f"  - Full report: {report_file}")
+    print(f"  - Individual filings: {len(state.chunked_filings)} JSON files")
 
-        # 2. Processing Stage
-        for filing_meta in async_tqdm(all_download_metadata, desc="Parsing & Chunking Filings"):
-            file_path = filing_meta["path"]
-            cik = filing_meta["cik"]
-            filing_type = filing_meta["filing_type"]
-            accession_number = filing_meta["accession_number"]
-
-            detail_entry = {
-                "cik": cik,
-                "filing_type": filing_type,
-                "accession_number": accession_number,
-                "path": file_path,
-                "status": "pending",
-                "message": ""
-            }
-
-            try:
-                # A. Parse Document
-                parsed_content = self.parser.parse_filing(file_path)
-                full_text = parsed_content["text"]
-                tables = parsed_content["tables"]
-
-                if not full_text:
-                    raise ValueError(
-                        f"No text extracted from filing: {file_path}")
-
-                # B. Deduplicate using Content Hash
-                content_hash = self.registry.compute_content_hash(full_text)
-
-                # if self.registry.is_processed(content_hash):
-                #     self.processed_summary["skipped_duplicates"] += 1
-                #     detail_entry.update(
-                #         status="skipped", message="Duplicate filing (content hash exists)")
-                #     logger.info("Skipped duplicate filing", cik=cik, filing_type=filing_type,
-                #                 accession_number=accession_number, content_hash=content_hash)
-                #     self.processed_summary["details"].append(detail_entry)
-                #     continue
-
-                # Mark as processed BEFORE chunking to prevent re-processing if chunking fails
-                # (Optional decision: could also mark AFTER successful chunking)
-                self.registry.mark_as_processed(content_hash)
-                filing_meta["processed_hash"] = content_hash
-
-                # C. Chunk Document
-                chunks = self.chunker.chunk_document(full_text)
-
-                if not chunks:
-                    raise ValueError(
-                        f"No chunks generated from filing: {file_path}")
-
-                self.processed_summary["unique_filings_processed"] += 1
-                detail_entry.update(
-                    status="processed",
-                    message=f"Processed successfully into {len(chunks)} chunks.",
-                    num_chunks=len(chunks),
-                    num_tables=len(tables),
-                    content_hash=content_hash
-                )
-                logger.info("Filing processed", cik=cik, filing_type=filing_type,
-                            accession_number=accession_number, num_chunks=len(chunks), num_tables=len(tables))
-
-            except ValueError as ve:
-                self.processed_summary["parsing_errors"] += 1
-                detail_entry.update(
-                    status="failed", message=f"Processing error: {ve}")
-                logger.error("Processing failed for filing", cik=cik, filing_type=filing_type,
-                             accession_number=accession_number, error=str(ve))
-
-            except Exception as e:
-                self.processed_summary["parsing_errors"] += 1
-                detail_entry.update(
-                    status="failed", message=f"Unexpected error during processing: {e}")
-                logger.error("Unexpected error during processing", cik=cik,
-                             filing_type=filing_type, accession_number=accession_number, error=str(e))
-
-            self.processed_summary["details"].append(detail_entry)
-
-        logger.info("Full SEC pipeline run completed.")
-        return self.processed_summary
-
-# --- Execution Block ---
+    return report
 
 
-async def run_full_pipeline_demo():
-    pipeline = SECPipeline()
-    sample_ciks_for_full_run = ["0000320193", "0001318605"]  # Apple, Tesla
-    sample_filing_types_for_full_run = ["10-K", "10-Q"]
+# ============================================================================
+# USAGE EXAMPLE
+# ============================================================================
 
-    # Let's try downloading 1 filing of each type for each company.
-    # If the registry is persistent, subsequent runs will skip duplicates.
-    pipeline_report = await pipeline.run_pipeline(
-        ciks=sample_ciks_for_full_run,
-        filing_types=sample_filing_types_for_full_run,
-        after_date="2022-01-01",
+async def main():
+    """Example of running the pipeline step by step."""
+
+    # Step 1: Initialize
+    state = step1_initialize_pipeline(
+        company_name="QuantInsight Analytics",
+        email_address="your_email@quantinsight.com",
+        download_dir="./sec_filings"
+    )
+
+    # Step 2: Add downloader
+    state = step2_add_downloader(state)
+
+    # Step 3: Configure rate limiting
+    state = step3_configure_rate_limiting(state, request_delay=0.1)
+
+    # Step 4: Download filings
+    state = await step4_download_filings(
+        state,
+        ciks=["0000320193"],  # Apple
+        filing_types=["10-K"],
+        after_date="2023-01-01",
         limit=1
     )
-    return pipeline_report
 
-# Note: The 'await' keyword at the top level works in Jupyter Notebooks.
-# If running this as a standalone script, wrap this in asyncio.run(run_full_pipeline_demo())
-# final_pipeline_report = await run_full_pipeline_demo()
+    # Step 5: Parse documents
+    state = await step5_parse_documents(state)
 
-# # Display the summary report
-# print("\n" + "="*50)
-# print("SEC EDGAR Pipeline Summary Report")
-# print("="*50)
-# print(
-#     f"Total attempted downloads (based on CIKs * FilingTypes * Limit): {final_pipeline_report['attempted_downloads']}")
-# print(
-#     f"Unique filings successfully processed: {final_pipeline_report['unique_filings_processed']}")
-# print(
-#     f"Filings skipped due to deduplication: {final_pipeline_report['skipped_duplicates']}")
-# print(
-#     f"Filings failed during parsing/chunking: {final_pipeline_report['parsing_errors']}")
+    # Step 6: Deduplicate
+    state = step6_deduplicate_documents(state)
 
-# print("\n--- Details of Processed Filings ---")
-# for detail in final_pipeline_report['details']:
-#     print(f" CIK: {detail['cik']}, Type: {detail['filing_type']}, Acc #: {detail['accession_number']}, Status: {detail['status']}, Message: {detail['message']}")
-# print("="*50)
+    # Step 7: Chunk text
+    state = await step7_chunk_text(state, chunk_size=750, chunk_overlap=50)
+
+    # Step 8: Build pipeline
+    state = step8_build_pipeline(state)
+
+    # Step 9: Generate report
+    report = step9_generate_report(state, output_dir="./pipeline_output")
+
+    return state, report
+
+
+# To run:
+# state, report = await main()

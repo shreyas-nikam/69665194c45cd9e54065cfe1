@@ -17,3 +17,5 @@ structlog
 tqdm
 reportlab
 streamlit-mermaid
+pdfkit
+lxml
