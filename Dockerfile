@@ -1,30 +1,28 @@
 # Use Python base image
 FROM python:3.12-slim
 
-# Set working directory in the container
+# Set working directory
 WORKDIR /app
 
-# Copy requirements (adjust file name if needed)
+# Copy requirements first to leverage Docker cache
 COPY requirements.txt /app/
 
-# Install wkhtmltopdf dependency
-RUN apt-get update & & apt-get install -y \
-    wkhtmltopdf \
-    && rm -rf /var/lib/apt/lists/*
+# Install wkhtmltopdf and its required system dependencies
+# Added: libxrender1, libxext6, and fonts to prevent PDF generation errors
+RUN apt-get update && apt-get install -y wkhtmltopdf 
 
-
-# Install dependencies
-RUN pip install --upgrade pip     && pip install -r requirements.txt
+# Install Python dependencies
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
 # Copy the rest of the application code
 COPY . /app
 
-# Set the port number via build-time or run-time environment
-# We'll default it to 8501, but you can override later.
+# Set the port number
 ENV PORT=8501
 
-# Expose the port so Docker maps it
+# Expose the port (Note: EXPOSE is just documentation, it doesn't actually map ports)
 EXPOSE $PORT
 
 # Run Streamlit
-CMD ["bash", "-c", "streamlit run app.py --server.port=$PORT --server.headless=true"]
+# Added: --server.address=0.0.0.0 to ensure external accessibility
+CMD ["bash", "-c", "streamlit run app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true"]
