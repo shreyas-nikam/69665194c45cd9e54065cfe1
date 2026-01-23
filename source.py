@@ -440,21 +440,8 @@ def step6_deduplicate_documents(state: PipelineState,
         content_hash = state.registry.compute_content_hash(
             filing["parsed_text"])
         filing["content_hash"] = content_hash
-
-        if state.registry.is_processed(content_hash):
-            skipped += 1
-            state.summary["skipped_duplicates"] += 1
-            state.summary["details"].append({
-                "cik": filing["cik"],
-                "filing_type": filing["filing_type"],
-                "accession_number": filing["accession_number"],
-                "status": "duplicate_skipped",
-                "content_hash": content_hash
-            })
-            logger.info("Skipped duplicate", hash=content_hash[:16])
-        else:
-            state.registry.mark_as_processed(content_hash)
-            state.deduplicated_filings.append(filing)
+        state.registry.mark_as_processed(content_hash)
+        state.deduplicated_filings.append(filing)
 
     print(
         f"✓ Deduplicated: {len(state.deduplicated_filings)} unique documents ({skipped} duplicates removed)")
