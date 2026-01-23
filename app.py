@@ -23,6 +23,7 @@ from source import (
     step7_chunk_text,
     step8_build_pipeline,
     step9_generate_report,
+    normalize_parsed_tables,
     FILING_TYPES
 )
 
@@ -454,20 +455,99 @@ elif st.session_state.current_step == 5:
                 st.error(f"❌ Error parsing documents: {e}")
 
     if len(st.session_state.step_outputs) >= 5:
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("### Sample Parsed PDF Content")
+            sample_pdf_parsed = next((
+                (f for f in st.session_state.pipeline_state.parsed_filings if f['path'].endswith('.pdf'))), None)
+            if sample_pdf_parsed:
+                # show original file content
+
+                with st.expander("Original PDF Content"):
+                    st.pdf(sample_pdf_parsed['path'])
+
+                with st.expander(f"View PDF parsing output (truncated) ", expanded=False):
+                    st.text(sample_pdf_parsed['parsed_text'][:1000] + "...")
+                    st.caption(
+                        f"Tables found: {len(sample_pdf_parsed.get('parsed_tables', []))}")
+
+                # show 5 tables
+                with st.expander("Extracted Tables Preview (First 10)", expanded=False):
+                    if sample_pdf_parsed and sample_pdf_parsed.get('parsed_tables'):
+                        cleaned_tables = normalize_parsed_tables(
+                            sample_pdf_parsed['parsed_tables'])
+                        dfs = [
+                            pd.DataFrame(t["rows"], columns=t["headers"]).assign(
+                                page=t["page"])
+                            for t in cleaned_tables
+                        ]
+                        count = 0
+
+                        for i, df_table in enumerate(dfs):
+                            if count >= 10:
+                                break
+                            try:
+                                st.markdown(
+                                    f"**Table {count+1}**")
+                                st.dataframe(df_table.drop(
+                                    columns=['page']), use_container_width=True)
+                            except Exception as e:
+                                pass
+                            count += 1
+
+                    else:
+                        st.markdown("No tables extracted from the sample PDF.")
+        with col2:
+
+            st.markdown("### Sample Parsed HTML Content")
+
+            sample_html_parsed = next((
+                (f for f in st.session_state.pipeline_state.parsed_filings if f['path'].endswith('.htm') or f['path'].endswith('.html'))), None)
+            if sample_html_parsed:
+                with st.expander("Original HTML Content"):
+                    with open(sample_html_parsed['path'], 'r', encoding='utf-8') as f:
+                        html_content = f.read()
+                    with st.container(height=500):
+                        st.html(html_content)
+                with st.expander(f"View HTML parsing output (truncated) ", expanded=False):
+
+                    st.text(sample_html_parsed['parsed_text'][:1000] + "...")
+                    st.caption(
+                        f"Tables found: {len(sample_html_parsed.get('parsed_tables', []))}")
+
+                # show 5 tables
+                with st.expander("Extracted Tables Preview (First 10)", expanded=False):
+                    if sample_html_parsed and sample_html_parsed.get('parsed_tables'):
+                        cleaned_tables = normalize_parsed_tables(
+                            sample_html_parsed['parsed_tables'])
+                        dfs = [
+                            pd.DataFrame(t["rows"], columns=t["headers"]).assign(
+                                page=t["page"])
+                            for t in cleaned_tables
+                        ]
+                        count = 0
+                        for i, df_table in enumerate(dfs):
+                            if count >= 10:
+                                break
+                            try:
+                                st.markdown(
+                                    f"**Table {count+1}**")
+                                st.dataframe(df_table.drop(
+                                    columns=['page']), use_container_width=True)
+                            except Exception as e:
+                                pass
+                            count += 1
+                    else:
+                        st.markdown(
+                            "No tables extracted from the sample HTML.")
         st.success(
             f"✓ Parsed {len(st.session_state.pipeline_state.parsed_filings)} documents successfully!")
 
         if st.session_state.pipeline_state.summary["parsing_errors"] > 0:
             st.warning(
                 f"⚠️ {st.session_state.pipeline_state.summary['parsing_errors']} parsing errors occurred")
-        # Show sample parsed content
-        if st.session_state.pipeline_state.parsed_filings:
-            st.markdown("### Sample Parsed Content")
-            sample = st.session_state.pipeline_state.parsed_filings[0]
-            with st.expander(f"View sample: {sample['cik']} - {sample['filing_type']}", expanded=False):
-                st.text(sample['parsed_text'][:500] + "...")
-                st.caption(
-                    f"Tables found: {len(sample.get('parsed_tables', []))}")
 
         st.session_state.current_step = 6
         st.success("✓ Documents parsed successfully! Proceed to Step 6.")

@@ -1,3 +1,4 @@
+from typing import Any, Dict, List, Optional
 from typing import List, Dict, Optional, Any, Tuple
 from pathlib import Path
 import hashlib
@@ -190,10 +191,11 @@ async def step4_download_filings(state: PipelineState,
 
                             if txt_file:
                                 txt_content = open(txt_file, "r").read()
-                                txt_content = txt_content[:txt_content.index("</html>")+7]
+                                txt_content = txt_content[:txt_content.index(
+                                    "</html>")+7]
                                 with open(txt_file, "w") as f:
                                     f.write(txt_content)
-                                
+
                                 html_file = Path(txt_file).with_suffix(".html")
                                 with open(html_file, "w") as f:
                                     f.write(txt_content)
@@ -203,7 +205,7 @@ async def step4_download_filings(state: PipelineState,
                                     "accession_number": accession_dir.name,
                                     "path": str(html_file)
                                 })
-                                
+
                                 try:
                                     print("Converting HTML to PDF:", html_file)
                                     pdf_file = str(
@@ -217,11 +219,11 @@ async def step4_download_filings(state: PipelineState,
                             # print(pdf_file, os.path.exists(pdf_file))
                             if os.path.exists(pdf_file):
                                 state.downloaded_filings.append({
-                                        "cik": cik,
-                                        "filing_type": filing_type,
-                                        "accession_number": accession_dir.name,
-                                        "path": str(pdf_file)
-                                    })
+                                    "cik": cik,
+                                    "filing_type": filing_type,
+                                    "accession_number": accession_dir.name,
+                                    "path": str(pdf_file)
+                                })
 
                 logger.info("Downloaded filings", cik=cik,
                             filing_type=filing_type)
@@ -717,3 +719,112 @@ async def main():
 
 # To run:
 # state, report = await main()
+
+
+_EMPTY_RE = re.compile(r"^\s*$")
+
+
+def _clean_cell(x: Any) -> Optional[str]:
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return str(x)
+    s = str(x).strip()
+    if s.lower() in {"null", "none", "nan"} or _EMPTY_RE.match(s):
+        return None
+    return s
+
+
+def _make_unique_headers(headers: List[Optional[str]]) -> List[str]:
+    """
+    Ensure headers are non-empty and unique.
+    - None/empty -> col_i
+    - duplicates -> suffix _2, _3 ...
+    """
+    out: List[str] = []
+    seen: Dict[str, int] = {}
+
+    for i, h in enumerate(headers):
+        base = (h or "").strip()
+        if not base:
+            base = f"col_{i}"
+
+        # de-dupe
+        if base not in seen:
+            seen[base] = 1
+            out.append(base)
+        else:
+            seen[base] += 1
+            out.append(f"{base}_{seen[base]}")
+
+    return out
+
+
+def _headers_look_like_data(headers: List[Optional[str]]) -> bool:
+    """
+    Heuristic: SEC/PDF extracted 'headers' are actually a data row if:
+    - many numeric/currency-like tokens OR
+    - lots of None/empty mixed with values
+    """
+    cleaned = [(h or "").strip() for h in headers]
+    if not cleaned:
+        return True
+
+    empties = sum(1 for h in cleaned if not h)
+    nonempties = len(cleaned) - empties
+
+    # numeric-ish tokens
+    num_like = 0
+    for h in cleaned:
+        if not h:
+            continue
+        if re.fullmatch(r"[\$]?", h) or re.fullmatch(r"[\d,]+(\.\d+)?", h):
+            num_like += 1
+
+    # If it's mostly empty, or many numeric-ish values, treat as "not real header"
+    if nonempties == 0:
+        return True
+    if empties / len(cleaned) >= 0.35:
+        return True
+    if num_like / max(nonempties, 1) >= 0.40:
+        return True
+
+    return False
+
+
+def normalize_parsed_tables(parsed_tables: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized = []
+
+    for t in parsed_tables:
+        page = t.get("page")
+        headers_raw = t.get("headers") or []
+        rows_raw = t.get("rows") or []
+
+        headers = [_clean_cell(h) for h in headers_raw]
+        rows = [[_clean_cell(c) for c in (r or [])] for r in rows_raw]
+
+        max_row_len = max([len(r) for r in rows], default=0)
+        ncols = max(len(headers), max_row_len)
+
+        if ncols == 0:
+            normalized.append({"page": page, "headers": [], "rows": []})
+            continue
+
+        headers = (headers + [None] * ncols)[:ncols]
+
+        # If headers are garbage / data-like, replace entirely
+        if _headers_look_like_data(headers):
+            headers = [f"col_{i}" for i in range(ncols)]
+
+        # Pad/truncate rows to ncols
+        fixed_rows = []
+        for r in rows:
+            fixed_rows.append((r + [None] * ncols)[:ncols])
+
+        # Final: ensure unique + non-empty column names (prevents your ValueError)
+        headers = _make_unique_headers(headers)
+
+        normalized.append(
+            {"page": page, "headers": headers, "rows": fixed_rows})
+
+    return normalized
