@@ -9,7 +9,12 @@ COPY requirements.txt /app/
 
 # Install wkhtmltopdf and its required system dependencies
 # Added: libxrender1, libxext6, and fonts to prevent PDF generation errors
-RUN apt-get update && apt-get install -y wkhtmltopdf 
+RUN apt-get update && apt-get install -y \
+    wget \
+    && wget https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.bookworm_amd64.deb \
+    && apt-get install -y ./wkhtmltox_0.12.6.1-3.bookworm_amd64.deb \
+    && rm wkhtmltox_0.12.6.1-3.bookworm_amd64.deb \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
 RUN pip install --upgrade pip && pip install -r requirements.txt
