@@ -474,7 +474,7 @@ elif st.session_state.current_step == 5:
                         f"Tables found: {len(sample_pdf_parsed.get('parsed_tables', []))}")
 
                 # show 5 tables
-                with st.expander("Extracted Tables Preview (First 10)", expanded=False):
+                with st.expander("Extracted Tables Preview (Truncated)", expanded=False):
                     if sample_pdf_parsed and sample_pdf_parsed.get('parsed_tables'):
                         cleaned_tables = normalize_parsed_tables(
                             sample_pdf_parsed['parsed_tables'])
@@ -493,9 +493,9 @@ elif st.session_state.current_step == 5:
                                     f"**Table {count+1}**")
                                 st.dataframe(df_table.drop(
                                     columns=['page']), use_container_width=True)
+                                count += 1
                             except Exception as e:
                                 pass
-                            count += 1
 
                     else:
                         st.markdown("No tables extracted from the sample PDF.")
@@ -518,7 +518,7 @@ elif st.session_state.current_step == 5:
                         f"Tables found: {len(sample_html_parsed.get('parsed_tables', []))}")
 
                 # show 5 tables
-                with st.expander("Extracted Tables Preview (First 10)", expanded=False):
+                with st.expander("Extracted Tables Preview (Truncated)", expanded=False):
                     if sample_html_parsed and sample_html_parsed.get('parsed_tables'):
                         cleaned_tables = normalize_parsed_tables(
                             sample_html_parsed['parsed_tables'])
@@ -536,9 +536,9 @@ elif st.session_state.current_step == 5:
                                     f"**Table {count+1}**")
                                 st.dataframe(df_table.drop(
                                     columns=['page']), use_container_width=True)
+                                count += 1
                             except Exception as e:
                                 pass
-                            count += 1
                     else:
                         st.markdown(
                             "No tables extracted from the sample HTML.")
