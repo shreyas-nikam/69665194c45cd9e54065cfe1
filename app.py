@@ -96,14 +96,13 @@ available_steps = list(
     range(1, max(st.session_state.step_outputs.keys() or [0]) + 2))
 available_steps = [s for s in available_steps if s <= 9]
 
-selected_step = 1
 if len(available_steps) >= 1:
-    selected_step = st.sidebar.selectbox(
+    st.session_state.current_step = st.sidebar.selectbox(
         "Go to step",
         options=available_steps,
         format_func=lambda x: step_options[x],
         index=available_steps.index(
-            st.session_state.current_step) if selected_step in available_steps else 0,
+            st.session_state.current_step) if st.session_state.current_step in available_steps else 0,
         key="jump_to_step"
     )
 
@@ -137,7 +136,7 @@ st.divider()
 # =============================================================================
 # STEP 1: Initialize Pipeline
 # =============================================================================
-if selected_step == 1:
+if st.session_state.current_step == 1:
     st.markdown("# Step 1: Initialize Pipeline")
     stmd.st_mermaid(get_mermaid_diagram(1))
 
@@ -178,19 +177,21 @@ if selected_step == 1:
                     "company_name": company_name,
                     "email_address": email_address,
                 }
-                st.success("✓ Pipeline initialized successfully!")
-                st.info(f"📁 Files will be stored in: `{download_dir}`")
 
-                # Move to next step
-                st.session_state.current_step = 2
                 st.rerun()
+
             except Exception as e:
                 st.error(f"❌ Error initializing pipeline: {e}")
+
+    if len(st.session_state.step_outputs) >= 1:
+        st.success("✓ Pipeline initialized successfully! Proceed to Step 2.")
+        st.session_state.current_step = 2
+
 
 # =============================================================================
 # STEP 2: Add Downloader
 # =============================================================================
-elif selected_step == 2:
+elif st.session_state.current_step == 2:
     st.markdown("# Step 2: Add SEC Downloader")
     stmd.st_mermaid(get_mermaid_diagram(2))
 
@@ -219,18 +220,18 @@ elif selected_step == 2:
                     "company_name": state.company_name,
                     "email_address": state.email_address
                 }
-                st.success("✓ SEC Downloader added successfully!")
-
-                # Move to next step
-                st.session_state.current_step = 3
                 st.rerun()
+
             except Exception as e:
                 st.error(f"❌ Error adding downloader: {e}")
 
+    if len(st.session_state.step_outputs) >= 2:
+        st.session_state.current_step = 3
+        st.success("✓ SEC Downloader added successfully! Proceed to Step 3.")
 # =============================================================================
 # STEP 3: Configure Rate Limiting
 # =============================================================================
-elif selected_step == 3:
+elif st.session_state.current_step == 3:
     st.markdown("# Step 3: Configure Rate Limiting")
     stmd.st_mermaid(get_mermaid_diagram(3))
 
@@ -272,19 +273,20 @@ elif selected_step == 3:
                     "request_delay": request_delay,
                     "requests_per_second": requests_per_second
                 }
-                st.success(
-                    f"✓ Rate limiting configured: {request_delay}s delay ({requests_per_second:.1f} req/s)")
-
-                # Move to next step
-                st.session_state.current_step = 4
                 st.rerun()
             except Exception as e:
                 st.error(f"❌ Error configuring rate limiting: {e}")
 
+    if len(st.session_state.step_outputs) >= 3:
+        st.session_state.current_step = 4
+        st.success(
+            f"✓ Rate limiting configured: {request_delay}s delay ({requests_per_second:.1f} req/s). Proceed to Step 4.")
+
+
 # =============================================================================
 # STEP 4: Download Filings
 # =============================================================================
-elif selected_step == 4:
+elif st.session_state.current_step == 4:
     st.markdown("# Step 4: Download SEC Filings")
     stmd.st_mermaid(get_mermaid_diagram(4))
 
@@ -357,54 +359,62 @@ elif selected_step == 4:
                     "limit": limit,
                     "downloaded_count": len(state.downloaded_filings)
                 }
-                st.success(
-                    f"✓ Downloaded {len(state.downloaded_filings)} filings successfully!")
+                st.rerun()
 
-                # Show download summary
-                if state.downloaded_filings:
-                    df = pd.DataFrame(state.downloaded_filings)
-                    st.dataframe(
-                        df[['cik', 'filing_type', 'accession_number', 'path']], width='stretch')
-
-                # let the user download the files in a zip
-
-                zip_buffer = io.BytesIO()
-
-                # Use ZIP_DEFLATED to compress the files
-                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-
-                    # 1. Define the base directory and resolve it to an absolute path
-                    # This acts as the "root" of your zip structure
-                    base_dir = Path("./sec_filings").resolve()
-
-                    for filing in state.downloaded_filings:
-                        file_path = Path(filing['path']).resolve()
-
-                        try:
-                            # 2. Compute the relative path from the base directory
-                            # This preserves the structure (e.g., "10-K/0000320193/...")
-                            arcname = file_path.relative_to(base_dir)
-                        except ValueError:
-                            # Fallback: if the file is outside the base_dir, just use the filename
-                            arcname = file_path.name
-
-                        zf.write(file_path, arcname=str(arcname))
-
-                zip_buffer.seek(0)
-
-                st.download_button(
-                    label="📥 Download ZIP of All Filings",
-                    data=zip_buffer,
-                    file_name="sec_filings.zip",
-                    mime="application/zip"
-                )
             except Exception as e:
                 st.error(f"❌ Error downloading filings: {e}")
+
+    if len(st.session_state.step_outputs) >= 4:
+        st.success(
+            f"✓ Downloaded {len(st.session_state.pipeline_state.downloaded_filings)} filings successfully!")
+
+        # Show download summary
+        if st.session_state.pipeline_state.downloaded_filings:
+            df = pd.DataFrame(
+                st.session_state.pipeline_state.downloaded_filings)
+            st.dataframe(
+                df[['cik', 'filing_type', 'accession_number', 'path']], width='stretch')
+
+        # let the user download the files in a zip
+
+        zip_buffer = io.BytesIO()
+
+        # Use ZIP_DEFLATED to compress the files
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+
+            # 1. Define the base directory and resolve it to an absolute path
+            # This acts as the "root" of your zip structure
+            base_dir = Path("./sec_filings").resolve()
+
+            for filing in st.session_state.pipeline_state.downloaded_filings:
+                file_path = Path(filing['path']).resolve()
+
+                try:
+                    # 2. Compute the relative path from the base directory
+                    # This preserves the structure (e.g., "10-K/0000320193/...")
+                    arcname = file_path.relative_to(base_dir)
+                except ValueError:
+                    # Fallback: if the file is outside the base_dir, just use the filename
+                    arcname = file_path.name
+
+                zf.write(file_path, arcname=str(arcname))
+
+        zip_buffer.seek(0)
+
+        st.download_button(
+            label="📥 Download ZIP of All Filings",
+            data=zip_buffer,
+            file_name="sec_filings.zip",
+            mime="application/zip"
+        )
+
+        st.session_state.current_step = 5
+        st.success("✓ Filings downloaded successfully! Proceed to Step 5.")
 
 # =============================================================================
 # STEP 5: Parse Documents
 # =============================================================================
-elif selected_step == 5:
+elif st.session_state.current_step == 5:
     st.markdown("# Step 5: Parse Documents")
     stmd.st_mermaid(get_mermaid_diagram(5))
 
@@ -438,32 +448,33 @@ elif selected_step == 5:
                     "parsed_count": len(state.parsed_filings),
                     "parsing_errors": state.summary["parsing_errors"]
                 }
-                st.success(
-                    f"✓ Parsed {len(state.parsed_filings)} documents successfully!")
-
-                if state.summary["parsing_errors"] > 0:
-                    st.warning(
-                        f"⚠️ {state.summary['parsing_errors']} parsing errors occurred")
-
-                # Show sample parsed content
-                if state.parsed_filings:
-                    st.markdown("### Sample Parsed Content")
-                    sample = state.parsed_filings[0]
-                    with st.expander(f"View sample: {sample['cik']} - {sample['filing_type']}", expanded=False):
-                        st.text(sample['parsed_text'][:500] + "...")
-                        st.caption(
-                            f"Tables found: {len(sample.get('parsed_tables', []))}")
-
-                # Move to next step
-                st.session_state.current_step = 6
                 st.rerun()
+
             except Exception as e:
                 st.error(f"❌ Error parsing documents: {e}")
 
+    if len(st.session_state.step_outputs) >= 5:
+        st.success(
+            f"✓ Parsed {len(st.session_state.pipeline_state.parsed_filings)} documents successfully!")
+
+        if st.session_state.pipeline_state.summary["parsing_errors"] > 0:
+            st.warning(
+                f"⚠️ {st.session_state.pipeline_state.summary['parsing_errors']} parsing errors occurred")
+        # Show sample parsed content
+        if st.session_state.pipeline_state.parsed_filings:
+            st.markdown("### Sample Parsed Content")
+            sample = st.session_state.pipeline_state.parsed_filings[0]
+            with st.expander(f"View sample: {sample['cik']} - {sample['filing_type']}", expanded=False):
+                st.text(sample['parsed_text'][:500] + "...")
+                st.caption(
+                    f"Tables found: {len(sample.get('parsed_tables', []))}")
+
+        st.session_state.current_step = 6
+        st.success("✓ Documents parsed successfully! Proceed to Step 6.")
 # =============================================================================
 # STEP 6: Deduplicate Documents
 # =============================================================================
-elif selected_step == 6:
+elif st.session_state.current_step == 6:
     st.markdown("# Step 6: Deduplicate Documents")
     stmd.st_mermaid(get_mermaid_diagram(6))
 
@@ -506,20 +517,21 @@ elif selected_step == 6:
                     "unique_filings": len(state.deduplicated_filings),
                     "duplicates_skipped": state.summary["skipped_duplicates"],
                 }
-                st.success(f"✓ Deduplication complete!")
-                st.info(
-                    f"📊 **{len(state.deduplicated_filings)} unique documents** | **{state.summary['skipped_duplicates']} duplicates** removed")
-
-                # Move to next step
-                st.session_state.current_step = 7
                 st.rerun()
             except Exception as e:
                 st.error(f"❌ Error during deduplication: {e}")
 
+    if len(st.session_state.step_outputs) >= 6:
+        st.session_state.current_step = 7
+        st.info(
+            f"📊 **{len(st.session_state.pipeline_state.deduplicated_filings)} unique documents** | **{st.session_state.pipeline_state.summary['skipped_duplicates']} duplicates** removed.")
+
+        st.success("✓ Documents deduplicated successfully! Proceed to Step 7.")
+
 # =============================================================================
 # STEP 7: Chunk Text
 # =============================================================================
-elif selected_step == 7:
+elif st.session_state.current_step == 7:
     st.markdown("# Step 7: Chunk Text")
     stmd.st_mermaid(get_mermaid_diagram(7))
 
@@ -582,31 +594,34 @@ elif selected_step == 7:
                     "chunk_size": chunk_size,
                     "chunk_overlap": chunk_overlap
                 }
-                st.success(f"✓ Chunking complete!")
-                st.info(
-                    f"📊 **{len(state.chunked_filings)} documents** chunked into **{total_chunks} total chunks**")
 
-                # Show chunk distribution
-                if state.chunked_filings:
-                    chunk_counts = [f['num_chunks']
-                                    for f in state.chunked_filings]
-                    df_chunks = pd.DataFrame({
-                        'CIK': [f['cik'] for f in state.chunked_filings],
-                        'Filing Type': [f['filing_type'] for f in state.chunked_filings],
-                        'Chunks': chunk_counts
-                    })
-                    st.dataframe(df_chunks, use_container_width=True)
-
-                # Move to next step
-                st.session_state.current_step = 8
                 st.rerun()
+
             except Exception as e:
                 st.error(f"❌ Error chunking documents: {e}")
+
+    if len(st.session_state.step_outputs) >= 7:
+        st.info(
+            f"📊 **{len(st.session_state.pipeline_state.chunked_filings)} documents** chunked.")
+
+        # Show chunk distribution
+        if st.session_state.pipeline_state.chunked_filings:
+            chunk_counts = [f['num_chunks']
+                            for f in st.session_state.pipeline_state.chunked_filings]
+            df_chunks = pd.DataFrame({
+                'CIK': [f['cik'] for f in st.session_state.pipeline_state.chunked_filings],
+                'Filing Type': [f['filing_type'] for f in st.session_state.pipeline_state.chunked_filings],
+                'Chunks': chunk_counts
+            })
+            st.dataframe(df_chunks, use_container_width=True)
+
+        st.success(f"✓ Chunking complete! Proceed to Step 8.")
+        st.session_state.current_step = 8
 
 # =============================================================================
 # STEP 8: Build Pipeline
 # =============================================================================
-elif selected_step == 8:
+elif st.session_state.current_step == 8:
     st.markdown("# Step 8: Build Pipeline")
     stmd.st_mermaid(get_mermaid_diagram(8))
 
@@ -643,27 +658,32 @@ elif selected_step == 8:
                     "duplicates_skipped": state.summary['skipped_duplicates'],
                     "parsing_errors": state.summary['parsing_errors']
                 }
-
-                st.success("✅ Pipeline validation passed!")
-
-                # Show validation summary
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Filings Processed", len(state.chunked_filings))
-                col2.metric("Total Chunks", total_chunks)
-                col3.metric("Duplicates Skipped",
-                            state.summary['skipped_duplicates'])
-                col4.metric("Errors", state.summary['parsing_errors'])
-
-                # Move to next step
-                st.session_state.current_step = 9
                 st.rerun()
+
             except Exception as e:
                 st.error(f"❌ Pipeline validation failed: {e}")
+
+    if len(st.session_state.step_outputs) >= 8:
+
+        # Show validation summary
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Filings Processed", len(
+            st.session_state.pipeline_state.chunked_filings))
+        total_chunks = sum(f.get('num_chunks', 0)
+                           for f in st.session_state.pipeline_state.chunked_filings)
+        col2.metric("Total Chunks", total_chunks)
+        col3.metric("Duplicates Skipped",
+                    st.session_state.pipeline_state.summary['skipped_duplicates'])
+        col4.metric(
+            "Errors", st.session_state.pipeline_state.summary['parsing_errors'])
+
+        st.session_state.current_step = 9
+        st.success("✅ Pipeline validation passed! Proceed to Step 9.")
 
 # =============================================================================
 # STEP 9: Generate Report
 # =============================================================================
-elif selected_step == 9:
+elif st.session_state.current_step == 9:
     st.markdown("# Step 9: Generate Report and Export Files")
     stmd.st_mermaid(get_mermaid_diagram(9))
 
